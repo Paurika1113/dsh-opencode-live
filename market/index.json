@@ -19,11 +19,11 @@
       "versions": [
         {
           "version": "0.2.0",
-          "publishTimestamp": 1792747182,
+          "publishTimestamp": 1792747792,
           "source": {
             "type": "git",
             "url": "https://github.com/Paurika1113/dsh-opencode-live",
-            "commit": "4c2916443dc4f264defceb1e18c731ffaa9de44f"
+            "commit": "0951b70a83f8fb4adaa7c86fccb946d0b99a6618"
           },
           "engines": { "dsh": ">=0.2.1-rc.2" }
         }
