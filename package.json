@@ -41,11 +41,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/YOUR_GITHUB_USERNAME/dsh-opencode-live.git"
+    "url": "git+https://github.com/Paurika1113/dsh-opencode-live.git"
   },
-  "homepage": "https://github.com/YOUR_GITHUB_USERNAME/dsh-opencode-live#readme",
+  "homepage": "https://github.com/Paurika1113/dsh-opencode-live#readme",
   "bugs": {
-    "url": "https://github.com/YOUR_GITHUB_USERNAME/dsh-opencode-live/issues"
+    "url": "https://github.com/Paurika1113/dsh-opencode-live/issues"
   },
   "author": "Paurika",
   "engines": {

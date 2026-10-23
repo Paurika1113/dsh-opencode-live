@@ -14,15 +14,15 @@
         "zh": "一个由网关实时模型清单驱动的 DSH 路由，逐模型适配协议差异。"
       },
       "author": "Paurika",
-      "homepage": "https://github.com/YOUR_GITHUB_USERNAME/dsh-opencode-live#readme",
-      "repository": { "url": "https://github.com/YOUR_GITHUB_USERNAME/dsh-opencode-live" },
+      "homepage": "https://github.com/Paurika1113/dsh-opencode-live#readme",
+      "repository": { "url": "https://github.com/Paurika1113/dsh-opencode-live" },
       "versions": [
         {
           "version": "0.2.0",
           "publishTimestamp": 1792747182,
           "source": {
             "type": "git",
-            "url": "https://github.com/YOUR_GITHUB_USERNAME/dsh-opencode-live",
+            "url": "https://github.com/Paurika1113/dsh-opencode-live",
             "commit": "4c2916443dc4f264defceb1e18c731ffaa9de44f"
           },
           "engines": { "dsh": ">=0.2.1-rc.2" }

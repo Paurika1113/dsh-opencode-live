@@ -9,8 +9,8 @@
 ```powershell
 cd D:\AIzy\杂\plugins\dsh-opencode-live
 
-# 用你自己的用户名替换 YOUR_GITHUB_USERNAME
-git remote add origin https://github.com/YOUR_GITHUB_USERNAME/dsh-opencode-live.git
+# 用你自己的用户名替换 Paurika1113
+git remote add origin https://github.com/Paurika1113/dsh-opencode-live.git
 git push -u origin main
 ```
 
@@ -20,15 +20,15 @@ git push -u origin main
 |------|------|
 | **Personal Access Token（最省事）** | GitHub → Settings → Developer settings → Personal access tokens → 生成一个带 `repo` 权限的 token，推送时把 token 当密码填（用户名填 GitHub 用户名） |
 | **Git Credential Manager** | 推送时若弹出浏览器登录窗口，直接登录即可，凭据会存进 Windows 凭据管理器 |
-| **SSH** | 把 `~/.ssh/id_ed25519.pub` 加到 GitHub → Settings → SSH and GPG keys，再 `git remote set-url origin git@github.com:YOUR_GITHUB_USERNAME/dsh-opencode-live.git` |
+| **SSH** | 把 `~/.ssh/id_ed25519.pub` 加到 GitHub → Settings → SSH and GPG keys，再 `git remote set-url origin git@github.com:Paurika1113/dsh-opencode-live.git` |
 
 ## 2. 把 package.json 里的占位符换成真实地址
 
-`package.json` 里现在写的是 `YOUR_GITHUB_USERNAME`。推送后执行（把用户名换成你的）：
+`package.json` 里现在写的是 `Paurika1113`。推送后执行（把用户名换成你的）：
 
 ```powershell
 cd D:\AIzy\杂\plugins\dsh-opencode-live
-(Get-Content package.json -Raw).Replace('YOUR_GITHUB_USERNAME', '你的GitHub用户名') | Set-Content package.json -NoNewline
+(Get-Content package.json -Raw).Replace('Paurika1113', '你的GitHub用户名') | Set-Content package.json -NoNewline
 git add package.json
 git commit -m "chore: point repository metadata at the real URL"
 git push
@@ -56,7 +56,7 @@ agent
 $token = '你的 PAT'
 $body = @{ names = @('dsh','dsh-plugin','dsh-bundle','cordis','opencode','opencode-zen','deepseek','llm','agent') } | ConvertTo-Json
 Invoke-RestMethod -Method Put `
-  -Uri 'https://api.github.com/repos/YOUR_GITHUB_USERNAME/dsh-opencode-live/topics' `
+  -Uri 'https://api.github.com/repos/Paurika1113/dsh-opencode-live/topics' `
   -Headers @{ Authorization = "Bearer $token"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' } `
   -Body $body -ContentType 'application/json'
 ```
@@ -83,15 +83,15 @@ DSH 的市场（`plugin_market` 工具 / 发现页）读的是索引 JSON（格�
         "zh": "一个由网关实时模型清单驱动的 DSH 路由。"
       },
       "author": "Paurika",
-      "homepage": "https://github.com/YOUR_GITHUB_USERNAME/dsh-opencode-live#readme",
-      "repository": { "url": "https://github.com/YOUR_GITHUB_USERNAME/dsh-opencode-live" },
+      "homepage": "https://github.com/Paurika1113/dsh-opencode-live#readme",
+      "repository": { "url": "https://github.com/Paurika1113/dsh-opencode-live" },
       "versions": [
         {
           "version": "0.2.0",
           "publishTimestamp": 1792747182,
           "source": {
             "type": "git",
-            "url": "https://github.com/YOUR_GITHUB_USERNAME/dsh-opencode-live",
+            "url": "https://github.com/Paurika1113/dsh-opencode-live",
             "commit": "4c2916443dc4f264defceb1e18c731ffaa9de44f"
           },
           "engines": { "dsh": ">=0.2.1-rc.2" }
@@ -120,4 +120,4 @@ DSH 的市场（`plugin_market` 工具 / 发现页）读的是索引 JSON（格�
 
 改好后把文件放到仓库里（例如 `market/index.json`），在 DSH 设置 → 插件市场里填该文件的 raw URL。
 
-`market/index.json` 里已经放了一份完整可用的样例（把 `YOUR_GITHUB_USERNAME` 和 `commit` 换成真实的即可）。**这份样例是用真实的 `parseMarketIndex` 实跑验证过的**——我从 `app.asar` 里把 `@deepseek-ai/dsh-plugin-market-index` 和它的 `semver` 依赖一起抽出来离线执行，输出 `VALID`，所以字段名和类型可以放心照抄。
+`market/index.json` 里已经放了一份完整可用的样例（把 `Paurika1113` 和 `commit` 换成真实的即可）。**这份样例是用真实的 `parseMarketIndex` 实跑验证过的**——我从 `app.asar` 里把 `@deepseek-ai/dsh-plugin-market-index` 和它的 `semver` 依赖一起抽出来离线执行，输出 `VALID`，所以字段名和类型可以放心照抄。
