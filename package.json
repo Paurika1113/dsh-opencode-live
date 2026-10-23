@@ -1,0 +1,65 @@
+{
+  "name": "dsh-opencode-live",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "A DSH route for OpenCode Go whose model roster is the gateway's live listing rather than the installed pi-ai snapshot, with per-model wire-protocol mapping, a per-conversation x-opencode-session header, and its own settings page.",
+  "main": "./lib/index.js",
+  "scripts": {
+    "test": "node scripts/selftest.mjs && node scripts/stream-test.mjs && node scripts/mount-test.mjs && node scripts/client-test.mjs && node scripts/zen-test.mjs && node scripts/host-contract-test.mjs",
+    "probe": "node scripts/live-probe.mjs",
+    "probe:quick": "node scripts/live-probe.mjs --quick"
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client.js",
+    "./config": "./lib/config.js",
+    "./discovery": "./lib/discovery.js",
+    "./session": "./lib/session.js",
+    "./protocol": "./lib/protocol.js",
+    "./capability": "./lib/capability.js",
+    "./effort": "./lib/effort.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "scripts",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "dsh-bundle",
+    "cordis",
+    "opencode",
+    "opencode-zen",
+    "deepseek",
+    "llm",
+    "model-discovery"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YOUR_GITHUB_USERNAME/dsh-opencode-live.git"
+  },
+  "homepage": "https://github.com/YOUR_GITHUB_USERNAME/dsh-opencode-live#readme",
+  "bugs": {
+    "url": "https://github.com/YOUR_GITHUB_USERNAME/dsh-opencode-live/issues"
+  },
+  "author": "Paurika",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": []
+    }
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,16 @@
+# dsh-opencode-live bundle patch.
+#
+# One `insert` creates the fiber. The profile's own `cordis.patch.yml` is the
+# layer that *overrides* it by id — exactly the pattern dsh-usage-dashboard and
+# dsh-our-free-model use, both of which mount with only their bundle patch and no
+# profile-layer entry.
+#
+# The route this fiber registers (`opencode-live`) is deliberately NOT
+# `opencode-go`: LlmRuntime.registerAdapter refuses a route another adapter
+# already owns, and the pi-ai adapter owns `opencode-go`.
+- insert:
+    - id: opencode-live
+      name: 'dsh-opencode-live'
+      config:
+        baseURL: https://opencode.ai/zen/go/v1
+        apiKeyEnv: OPENCODE_GO_API_KEY

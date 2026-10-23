@@ -1,0 +1,41 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # `host-contract-test.mjs` is deliberately excluded: it needs the real DSH
+      # host modules, which only exist inside an installed desktop app's
+      # app.asar. On a runner it exits non-zero with SKIP (it refuses to pass
+      # silently), so including it would just fail the job.
+      - name: Run the test suite
+        run: |
+          node scripts/selftest.mjs
+          node scripts/stream-test.mjs
+          node scripts/mount-test.mjs
+          node scripts/client-test.mjs
+          node scripts/zen-test.mjs
+
+  host-contract:
+    # Kept as a separate, non-blocking job so the requirement stays visible
+    # instead of disappearing into a comment.
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Host contract (needs an installed DSH desktop app)
+        run: node scripts/host-contract-test.mjs

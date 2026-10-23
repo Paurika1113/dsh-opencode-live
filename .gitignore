@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Runtime state: the plugin keeps its config, model catalogue cache and
+# mount record under ~/.dsh/opencode-live, but a checkout can pick up stray
+# copies if a probe or a test writes one locally.
+.dsh/
+*.local.json
+*.local.mjs
+
+# Logs and diagnostics
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-error.log*
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Credentials — this plugin reads the gateway key from an env var
+# (OPENCODE_GO_API_KEY) and never stores it, but never commit one either.
+.env
+.env.*
+!.env.example

@@ -1,0 +1,16 @@
+# Normalize line endings in the repository. Without this, a Windows checkout
+# stores CRLF and every clone on another platform sees a whole-file rewrite.
+* text=auto eol=lf
+
+# Patch files and YAML are read by the loader; keep their bytes stable.
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.json text eol=lf
+
+# Binary
+*.png binary
+*.jpg binary
+*.ico binary
