@@ -1,0 +1,33 @@
+{
+  "format": 1,
+  "title": { "en": "Paurika's DSH plugins", "zh": "Paurika 的 DSH 插件" },
+  "description": {
+    "en": "Plugins I maintain for the DSH desktop app.",
+    "zh": "我为 DSH 桌面端维护的插件。"
+  },
+  "plugins": [
+    {
+      "name": "dsh-opencode-live",
+      "title": { "en": "OpenCode Go live route", "zh": "OpenCode Go 实时路由" },
+      "description": {
+        "en": "One DSH route backed by the live gateway model roster, with a per-model wire protocol.",
+        "zh": "一个由网关实时模型清单驱动的 DSH 路由，逐模型适配协议差异。"
+      },
+      "author": "Paurika",
+      "homepage": "https://github.com/YOUR_GITHUB_USERNAME/dsh-opencode-live#readme",
+      "repository": { "url": "https://github.com/YOUR_GITHUB_USERNAME/dsh-opencode-live" },
+      "versions": [
+        {
+          "version": "0.2.0",
+          "publishTimestamp": 1792747182,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/YOUR_GITHUB_USERNAME/dsh-opencode-live",
+            "commit": "4c2916443dc4f264defceb1e18c731ffaa9de44f"
+          },
+          "engines": { "dsh": ">=0.2.1-rc.2" }
+        }
+      ]
+    }
+  ]
+}
