@@ -107,3 +107,43 @@ https://raw.githubusercontent.com/Paurika1113/dsh-opencode-live/main/market/inde
 第 4 步不是循环依赖：钉住的提交只要是**远端历史中的祖先**就合法，哪怕它里面的索引文件指向更早的 SHA。
 
 顺带：`.gitattributes` 里已经把行尾统一成 LF了，Windows 上 checkout 不会把每个文件显示成已修改。
+
+---
+
+## 发布 0.2.3 时补记的两件事
+
+### 1. 公开仓库别写内网地址
+
+这次的新功能（代理）用了真实的 NAS 地址 `192.168.1.48` 做示例和测试夹具。**它在 `origin/main` 里原本一个都没有**——是未提交的新代码带进来的，而仓库是公开的。
+
+发布前统一换成了 `192.0.2.10`（RFC 5737 的文档专用网段，永远不会指向真实主机）：
+
+```powershell
+foreach ($rel in @('README.md','scripts\selftest.mjs')) {
+  $f = Join-Path $root $rel
+  [System.IO.File]::WriteAllText($f, ([System.IO.File]::ReadAllText($f) -replace '192\.168\.1\.48','192.0.2.10'))
+}
+```
+
+推送后确认干净：
+
+```powershell
+git grep -n "192\.168\." <sha> -- .
+```
+
+### 2. `cd` 在一个 pwsh 调用里不跨命令生效
+
+本工具每次 `pwsh` 都是**新进程**，`Set-Location` 只影响那一次调用。之前有两次写文件落到了 `D:\AIzy\dsh\`（当前工作目录）而不是插件目录，因为用了相对路径。**凡是涉及写文件/提交，一律用绝对路径**或 `Push-Location`/`git -C`。
+
+### 3. 本地验证市场索引的正确姿势
+
+`parseMarketIndex(value, indexUrl)` 的第一个参数是**已解析的对象**，不是 JSON 文本；`marketInstallTarget(name, version)` 的第一个参数是**插件名字符串**，不是插件对象。签名猜不得，直接从 asar 里的源码读：
+
+```powershell
+# 找到并读出函数签名
+git grep 不适用；用上面的 asar 解包脚本，在
+#   dsh/node_modules/@deepseek-ai/dsh-plugin-market-index/lib/index.js
+# 里搜 "function parseMarketIndex" / "function marketInstallTarget"
+```
+
+依赖只有 `semver`，连同它一起按 asar 内的相对路径铺出来就能 `import`，无需网络。
