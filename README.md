@@ -140,6 +140,8 @@ fiber 本体由插件自带的 `cordis.patch.yml` 创建，你只需覆写它的
 | `route` | `opencode-live` | 注册的路由 ID。**不能是 `opencode-go`**（已归 pi-ai 适配器） |
 | `displayName` | `OpenCode Go · 实时目录` | 选择器里显示的名称 |
 | `baseURL` | `https://opencode.ai/zen/go` | 网关**前缀**。`/v1` 会补齐；完整端点（`…/chat/completions`）会被裁掉；前后空格会被清掉 |
+| `proxyUrl` | `''` | 可选 HTTP 代理出口，**两条车道共用**（Go 与 Zen 免费模型）。网关按出口地址做区域检查，部署在受限地区时把这里指到代理（如 NAS clash 的 `http://192.0.2.10:7890`），列表与对话即走代理；留空直连。仅支持 `http://`/`https://`（CONNECT 隧道），`socks://` 会被拒绝 |
+| `proxyEnabled` | `true` | 上面的代理**是否真的走**。设置页有对应开关：关掉即直连，`proxyUrl` 原样保留，下次打开仍然有效。与 `proxyUrl` 分开存，是为了让「先关掉、地址还在」成为一次点击而不是重填。开关对两条车道、模型列表与对话同时生效 |
 | `apiKey` | `''` | 填了就一定用它，优先于凭据库 |
 | `apiKeyEnv` | `OPENCODE_GO_API_KEY` | 凭据库引用名 |
 | `credentialRefs` | `[]` | 按顺序尝试的引用名 |
@@ -158,6 +160,12 @@ fiber 本体由插件自带的 `cordis.patch.yml` 创建，你只需覆写它的
 ### 为什么 `fingerprint` 默认关
 
 2026-10-21 实测，`minimax-m3.1-flash-free` 在 Go 订阅通道上带不带四件套工具都是 200。四件套是**免密 free 通道**的门，不是这条通道的。把它开着会让每个模型都收到四个自称不可用的诱饵工具。
+
+### 代理开关为什么是独立字段
+
+`proxyUrl` 回答「代理在哪」，`proxyEnabled` 回答「这一回合走不走它」。合成一个字段的话，「临时关掉代理」就等于「把地址删掉」——而这正是最需要代理开关的场景：**代理挂了，而路由跟着挂了**。症状是列表与对话全部 `fetch failed`，页面上却只显示一个 `失败: HTTP 502`（那是插件自己的刷新接口在报错，不是网关的），唯一出路是手改 `config.json`。分开存之后，设置页一个开关就能切回直连，地址留着，代理恢复后再一键切回来。
+
+默认 `true`：已经配了 `proxyUrl` 的部署行为不变，开关只在你主动关的时候才减少东西。
 
 ## 三种线路协议
 
@@ -201,8 +209,9 @@ fiber 本体由插件自带的 `cordis.patch.yml` 创建，你只需覆写它的
 | 路径 | 方法 | 作用 |
 |------|------|------|
 | `/view` | GET | 当前状态、完整目录（含每行的协议/图片/容量/档位与它们的继承值）、上次刷新结果 |
-| `/refresh` | POST | 重新拉列表，只拉列表，不探测任何协议 |
-| `/update` | POST | 合并写入配置：`modelProtocols`、`modelVision`、`modelSettings`、`visibleModels` 与标量字段 |
+| `/refresh` | POST | 重新拉列表，只拉列表，不探测任何协议。**失败时回 502**，响应体的 `message` 带着真实原因（如「无法连接网关：fetch failed」） |
+| `/refresh-zen` | POST | 同上，针对 Zen 免费车道；同样在失败时回 502 |
+| `/update` | POST | 合并写入配置：`modelProtocols`、`modelVision`、`modelSettings`、`visibleModels`、`proxyUrl`/`proxyEnabled` 与标量字段 |
 | `/probe` | POST | 对某个模型发一个最小请求（`{"model":"..."}`） |
 | `/health` | GET | 存活检查 |
 
@@ -222,10 +231,52 @@ fiber 本体由插件自带的 `cordis.patch.yml` 创建，你只需覆写它的
 { "modelSettings": { "m": { "reasoningEfforts": {} } } } // 零档位，这是真实指令
 ```
 
+代理开关是**两个分别存的字段**，不是一个：
+
+```json
+{ "proxyUrl": "http://127.0.0.1:7890", "proxyEnabled": false }   // 地址留着，这一回合直连
+{ "proxyUrl": null }                                             // 清掉地址
+```
+
+`/view` 除了 `proxyUrl` / `proxyEnabled`，还在 `egress.active` 里给出**这一回合真正会拨的出口**：开关关掉或地址为空时它是 `""`（直连）。页面照它显示状态，避免「填了地址却仍是直连」无从判断。
+
+## 错误码与重试
+
+抛出的网络故障必须带**机器可路由的 code**，否则宿主不会重试。这不是可选的美化——见下面的实测记录。
+
+`transportFailure(message, code, cause)` 需要同时写两个字段：
+
+```js
+error.code = code                  // 宿主拿它跟快照比对
+error.failure = { message, code }  // 宿主优先采用的序列化快照
+```
+
+宿主的判定逻辑（`dsh-llm` 的 `normalizeLlmFailure`）：
+
+```js
+const carried = ownFailureSnapshot(error)                       // 读 error.failure
+if (carried !== undefined && carried.code === ownErrorCode(error)) return carried
+return { message: errorMessage(error), code: harnessErrorCode(error) }  // instanceof HarnessError ? error.code : 'UNKNOWN'
+```
+
+只写 `failure` 会让 `ownErrorCode()` 得到 `undefined`，相等判断失败，落回 `instanceof HarnessError`——一个普通 `Error` 过不了这关，于是答 `UNKNOWN`。而 `UNKNOWN` 不在 `retryableCodes` 里，**瞬时网络抖动会直接终结整轮，一次都不重试**。
+
+> 2026-11-07 实测记录：871 个会话、约 1.6 GB 日志中，6 次 `transport failure: fetch failed` 全部记成 `UNKNOWN`，失败那一步的 `assistant/attempt` 只有 1 条。同期 `bq` 路由的 82 次网络错误因为走 HTTP 状态码路径（`describeFailure`），分类正常。
+
+### 为什么要打印 cause 链
+
+`fetch failed` 是 undici 的通用外壳。真正的原因在 `error.cause` 上，而代理失败会套多层：
+
+```
+fetch failed ← Proxy response (502) ← connect ECONNREFUSED 127.0.0.1:7890
+```
+
+`causeChainOf()` 把这条链提取成一行，列表刷新、流式请求、流式解码三处共用。没有它，一个本地代理端口没开会被读成"网关挂了"，而这正是排查时最容易走错的方向。
+
 ## 测试
 
 ```bash
-npm test          # 227 项离线：配置归一化、会话派生、三方言请求体/帧、工具配对、档位表、图片能力、挂载、设置页、Zen 门禁、宿主契约
+npm test          # 269 项离线：配置归一化、会话派生、三方言请求体/帧、工具配对、档位表、图片能力、挂载、设置页、代理开关、错误码与重试、Zen 门禁、宿主契约
 npm run probe     # 联网：实时列表 + 三种方言端到端（消耗少量 token）
 npm run probe:quick  # 联网：只验列表与一次对话
 ```
@@ -233,12 +284,12 @@ npm run probe:quick  # 联网：只验列表与一次对话
 离线套件不联网、不需要凭据：
 
 ```text
-scripts/selftest.mjs          119 项  纯函数与解析
+scripts/selftest.mjs          136 项  纯函数与解析（含代理开关、出口、cause 链）
 scripts/stream-test.mjs        13 项  对一个假网关驱动三方言（含工具调用组装、错误分类、中止）
-scripts/mount-test.mjs         49 项  fiber 挂载、路由注册、发现回调、卸载释放、设置页接口、可见性、图片能力、详细设置
-scripts/client-test.mjs        27 项  浏览器半边的槽位、词典、渲染与展开面板
-scripts/zen-test.mjs            9 项  Zen 会话、门禁指纹、头指纹、模型识别
-scripts/host-contract-test.mjs  10 项  真实宿主累积器对两条车道每个流事件契约校验
+scripts/mount-test.mjs         58 项  fiber 挂载、路由注册、发现回调、卸载释放、设置页接口、可见性、图片能力、详细设置、代理开关
+scripts/client-test.mjs        32 项  浏览器半边的槽位、词典、渲染与展开面板、代理开关
+scripts/zen-test.mjs           18 项  Zen 会话、门禁指纹、头指纹、模型识别
+scripts/host-contract-test.mjs 12 项  真实宿主累积器对两条车道每个流事件契约校验、错误码跨宿主归一化
 ```
 
 ### 宿主契约测试为什么单独存在
@@ -264,8 +315,9 @@ scripts/host-contract-test.mjs  10 项  真实宿主累积器对两条车道每�
 | `lib/session.js` | 会话 ID 与请求 ID 派生 |
 | `lib/capability.js` | 图片输入实测表（红/蓝对照）与用户覆盖 |
 | `lib/effort.js` | 每个模型家族的思考档位表（厂商文档）与用户自定义表 |
-| `lib/adapter.js` | 流式适配器：块记账、错误分类 |
-| `client.js` | 浏览器半边：两个设置槽位、中英词典、每行下拉框与展开面板 |
+| `lib/adapter.js` | 流式适配器：块记账、错误分类与重试码 |
+| `lib/proxy.js` | 代理出口：undici `ProxyAgent` 惰性解析、`causeChainOf`、进程内自检 |
+| `client.js` | 浏览器半边：两个设置槽位、中英词典、每行下拉框与展开面板、代理开关 |
 
 ## 打包约定
 

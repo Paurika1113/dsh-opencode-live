@@ -564,6 +564,117 @@ await test('同一档位不会被两行同时选中', async () => {
   assert.equal(highOption.props.disabled, true, '另一行已用的档位应禁用')
 })
 
+// ── the proxy switch ────────────────────────────────────────────────────────
+
+/** The rendered proxy card: the one containing the switch and the address box. */
+function proxyCardOf(tree) {
+  const switches = collect(tree, (node) => node?.props?.className === 'ocl_switch')
+  assert.ok(switches.length >= 1, '页面里找不到代理开关')
+  // The visibility rows use no switch, and the reasoning panel's switch lives inside
+  // an expanded model row; the proxy card's is the first one on the page.
+  return switches[0]
+}
+
+await test('代理开关按 proxyEnabled 渲染勾选态', async () => {
+  const on = await renderWithCatalogue([modelEntry('m1')], {
+    proxyEnabled: true,
+    egress: { proxyUrl: 'http://127.0.0.1:7890', active: 'http://127.0.0.1:7890' },
+  })
+  const onBox = collect(proxyCardOf(on.tree), (node) => node?.type === 'input')[0]
+  assert.equal(onBox.props.checked, true, '开关开启时应勾选')
+  assert.equal(onBox.props.disabled, false, '开关应可点')
+
+  const off = await renderWithCatalogue([modelEntry('m1')], {
+    proxyEnabled: false,
+    egress: { proxyUrl: 'http://127.0.0.1:7890', active: '' },
+  })
+  const offBox = collect(proxyCardOf(off.tree), (node) => node?.type === 'input')[0]
+  assert.equal(offBox.props.checked, false, '开关关闭时不应勾选')
+  // The address survives being switched off — that is the whole point of the
+  // separate field, and the box must still show it.
+  const values = collect(off.tree, (node) => node?.props?.defaultValue === 'http://127.0.0.1:7890')
+  assert.ok(values.length >= 1, '关掉开关后地址不该从页面消失')
+})
+
+await test('代理开关点一下就发 proxyEnabled，不带地址', async () => {
+  const { tree, client, element, props } = await renderWithCatalogue([modelEntry('m1')], {
+    proxyEnabled: true,
+    egress: { proxyUrl: 'http://127.0.0.1:7890', active: 'http://127.0.0.1:7890' },
+  })
+  const posted = []
+  const nextView = {
+    ...props,
+    proxyEnabled: false,
+    egress: { proxyUrl: 'http://127.0.0.1:7890', active: '' },
+  }
+  client.sandbox.fetch = async (url, init) => {
+    if (init?.body) posted.push({ url: String(url), body: JSON.parse(init.body) })
+    return {
+      ok: true,
+      status: 200,
+      text: async () => (String(url).endsWith('/view') ? JSON.stringify(nextView) : '{}'),
+    }
+  }
+  const box = collect(proxyCardOf(tree), (node) => node?.type === 'input')[0]
+  box.props.onChange({ target: { checked: false } })
+  await client.settle(element.type, props)
+  const update = posted.find((call) => call.url.endsWith('/update'))
+  assert.ok(update !== undefined, '点开关应发出 /update')
+  assert.deepEqual(update.body, { proxyEnabled: false }, '开关只该写 proxyEnabled，不该重发地址')
+})
+
+await test('开关开着但地址为空时点名这个状态', async () => {
+  const { tree } = await renderWithCatalogue([modelEntry('m1')], {
+    proxyEnabled: true,
+    egress: { proxyUrl: '', active: '' },
+  })
+  const text = flatten(tree)
+  assert.ok(text.includes('proxyOnButEmpty'), '空地址却是开状态时应提示')
+  const bad = collect(tree, (node) => node?.props?.className?.includes('ocl_inputBad'))
+  assert.ok(bad.length >= 1, '空地址的输入框应标红')
+})
+
+await test('地址框只接受 http(s)，非法输入不发请求', async () => {
+  const { tree, client, element, props } = await renderWithCatalogue([modelEntry('m1')], {
+    proxyEnabled: true,
+    egress: { proxyUrl: 'http://127.0.0.1:7890', active: 'http://127.0.0.1:7890' },
+  })
+  let calls = 0
+  client.sandbox.fetch = async () => {
+    calls += 1
+    return { ok: true, status: 200, text: async () => '{}' }
+  }
+  const input = collect(tree, (node) => node?.props?.defaultValue === 'http://127.0.0.1:7890')[0]
+  assert.ok(input !== undefined, '找不到代理地址输入框')
+  input.props.onBlur({ target: { value: '127.0.0.1:7890' } })
+  await client.settle(element.type, props)
+  assert.equal(calls, 0, '缺协议的地址不该发出去')
+  // The rejection is reported through the page's failure line; the failed-address
+  // dictionary key is what a later render would show, and asserting on it keeps a
+  // rename from silently dropping the message.
+  assert.ok(SOURCE.includes("t('proxyUrlInvalid')"), '源码里没有渲染 proxyUrlInvalid')
+})
+
+await test('清空地址框等于回到直连（发 null，不是空串）', async () => {
+  const { tree, client, element, props } = await renderWithCatalogue([modelEntry('m1')], {
+    proxyEnabled: true,
+    egress: { proxyUrl: 'http://127.0.0.1:7890', active: 'http://127.0.0.1:7890' },
+  })
+  const posted = []
+  client.sandbox.fetch = async (url, init) => {
+    if (init?.body) posted.push({ url: String(url), body: JSON.parse(init.body) })
+    return { ok: true, status: 200, text: async () => '{}' }
+  }
+  const input = collect(tree, (node) => node?.props?.defaultValue === 'http://127.0.0.1:7890')[0]
+  input.props.onBlur({ target: { value: '' } })
+  await client.settle(element.type, props)
+  const update = posted.find((call) => call.url.endsWith('/update'))
+  assert.ok(update !== undefined, '清空地址应发出 /update')
+  // `null` 是 /update 的"清掉地址"语义；空串会被 writeConfig 当成"没提到"删掉，
+  // 两种写法在服务端结果不同，所以这里断言的是那个真的会清掉的值。
+  assert.equal(update.body.proxyUrl, null, '清空地址应发 null')
+})
+
 section('结果')
 const total = passed + failures.length
 process.stdout.write(`\n${passed}/${total} 通过`)

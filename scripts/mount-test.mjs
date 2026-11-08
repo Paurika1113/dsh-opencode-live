@@ -59,6 +59,14 @@ function fakeCtx({ hasCredentials = true, registerAdapterThrows, brokenWebServer
     webRoutes: new Map(),
     mounts: [],
     writes: [],
+    /**
+     * Every Cordis event this fiber emitted, in order.
+     *
+     * A fake without `emit` would let the plugin claim it announced a roster
+     * change while the browser kept serving a stale catalog — the exact failure
+     * this suite has to be able to see.
+     */
+    events: [],
     overridesPath: fs.mkdtempSync(path.join(os.tmpdir(), 'ocl-mount-')),
   }
 
@@ -68,6 +76,9 @@ function fakeCtx({ hasCredentials = true, registerAdapterThrows, brokenWebServer
       warn: (...args) => state.warnings.push(args),
       error: (...args) => state.errors.push(args),
     },
+    // cordis mixes `emit` into every context; the real signature is
+    // `emit(name, ...args)`.
+    emit: (event, ...args) => { state.events.push({ event, args }) },
     get: (service) => (service === 'credentials' && hasCredentials ? {
       resolve: async (ref) => (ref === 'OPENCODE_GO_API_KEY' ? { value: 'test-key' } : undefined),
       // The real signature is `set(ref, value)` where value is the secret itself.
@@ -522,8 +533,59 @@ await test('/update 拒绝非对象 body', async () => {
   assert.equal(res.statusCode, 400)
 })
 
-await test('/reset 删掉覆盖配置文件', async () => {
+await test('/update 保存代理开关，且不丢地址', async () => {
   const { ctx, state } = fakeCtx()
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ocl-proxy-'))
+  apply(ctx, { overridesPath: tmp, baseURL: 'https://127.0.0.1:1/v1', discoveryTimeoutMs: 150 })
+  await settle()
+  const handler = state.webRoutes.get('/api/opencode-live')
+
+  const on = newResponse()
+  await handler(newRequest('/api/opencode-live/update', 'POST', {
+    proxyUrl: 'http://127.0.0.1:7890',
+  }), on)
+  assert.equal(on.statusCode, 200)
+  const withAddress = JSON.parse(on.body)
+  assert.equal(withAddress.proxyUrl, 'http://127.0.0.1:7890')
+  assert.equal(withAddress.proxyEnabled, true, '默认应视为开启')
+
+  // Turning it off must be one flag, with the address still readable — the whole
+  // reason the two fields are separate. `egress.active` is what the lanes dial.
+  const off = newResponse()
+  await handler(newRequest('/api/opencode-live/update', 'POST', { proxyEnabled: false }), off)
+  assert.equal(off.statusCode, 200)
+  const disabled = JSON.parse(off.body)
+  assert.equal(disabled.proxyEnabled, false)
+  assert.equal(disabled.proxyUrl, 'http://127.0.0.1:7890', '关掉开关时地址被丢了')
+  assert.equal(disabled.egress.active, '', '开关关掉后实际出口不是直连')
+
+  // …and it survives a re-read from disk, which is what makes it a setting rather
+  // than a session-scoped toggle.
+  const saved = JSON.parse(fs.readFileSync(path.join(tmp, 'config.json'), 'utf8'))
+  assert.equal(saved.proxyEnabled, false)
+  assert.equal(saved.proxyUrl, 'http://127.0.0.1:7890')
+})
+
+await test('/update 只写了无关字段时不会悄悄关掉代理', async () => {
+  // A save that never mentions the switch must not be read as "switch = false".
+  // Anything but an explicit boolean leaves the stored value alone.
+  const { ctx, state } = fakeCtx()
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ocl-proxy2-'))
+  apply(ctx, { overridesPath: tmp, baseURL: 'https://127.0.0.1:1/v1', discoveryTimeoutMs: 150 })
+  await settle()
+  const handler = state.webRoutes.get('/api/opencode-live')
+  const res = newResponse()
+  await handler(newRequest('/api/opencode-live/update', 'POST', {
+    proxyUrl: 'http://127.0.0.1:7890',
+    displayName: 'renamed',
+  }), res)
+  const payload = JSON.parse(res.body)
+  assert.equal(payload.displayName, 'renamed')
+  assert.equal(payload.proxyEnabled, true)
+  assert.equal(payload.egress.active, 'http://127.0.0.1:7890')
+})
+
+await test('/reset 删掉覆盖配置文件', async () => {  const { ctx, state } = fakeCtx()
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ocl-reset-'))
   apply(ctx, { overridesPath: tmp, baseURL: 'https://127.0.0.1:1/v1', discoveryTimeoutMs: 150 })
   await settle()
@@ -670,6 +732,179 @@ await test('adapter 的 listModels 只返回可见模型', async () => {
   await handler(newRequest('/api/opencode-live/update', 'POST', { visibleModels: ['a'] }), newResponse())
   const models = await state.adapters.get('opencode-live').listModels('opencode-live')
   assert.deepEqual(models.map((m) => m.id), ['a'], '适配器仍在服务隐藏的模型')
+})
+
+// ── roster announcements ────────────────────────────────────────────────────
+//
+// The bug this guards: saving a new visibility set updated the override file and
+// this plugin's own `/view`, but nothing told the Host the advertised roster had
+// moved. The browser keeps one model catalog per Host generation and reloads it
+// only on `llm/models-updated` / `llm/adapters-updated`, so the settings page
+// showed the new set while the composer's picker kept offering the old one —
+// reported as "I changed the models but the picker did not".
+
+section('模型清单广播')
+
+/** Every forwarded event name this fiber emitted, in order. */
+const emitted = (state) => state.events.map((entry) => entry.event)
+
+await test('保存 visibleModels 后广播 llm/models-updated（这条路由的 ID）', async () => {
+  const { ctx, state } = fakeCtx()
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ocl-ann-'))
+  mount(ctx, state, {
+    overridesPath: tmp,
+    baseURL: 'https://127.0.0.1:1/v1',
+    discoveryTimeoutMs: 150,
+    models: [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }],
+  })
+  await settle()
+  state.events.length = 0
+  const handler = state.webRoutes.get('/api/opencode-live')
+  await handler(newRequest('/api/opencode-live/update', 'POST', { visibleModels: ['b'] }), newResponse())
+
+  const announced = state.events.filter((entry) => entry.event === 'llm/models-updated')
+  assert.ok(announced.length > 0, '保存后没有广播 llm/models-updated，选择器不会重新拉取目录')
+  assert.ok(
+    announced.some((entry) => entry.args[0] === 'opencode-live'),
+    `广播的 provider 不是这条路由：${JSON.stringify(announced.map((entry) => entry.args))}`,
+  )
+  assert.ok(emitted(state).includes('llm/adapters-updated'), '也没有广播 llm/adapters-updated')
+})
+
+await test('保存 Zen 可见模型时广播 Zen 路由的 ID', async () => {
+  const { ctx, state } = fakeCtx()
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ocl-annzen-'))
+  mount(ctx, state, {
+    overridesPath: tmp,
+    baseURL: 'https://127.0.0.1:1/v1',
+    discoveryTimeoutMs: 150,
+    models: [{ id: 'a', name: 'A' }],
+    zen: { enabled: true, baseURL: 'https://127.0.0.1:1/zen/v1', route: 'opencode-zen-free' },
+  })
+  await settle()
+  state.events.length = 0
+  const handler = state.webRoutes.get('/api/opencode-live')
+  await handler(
+    newRequest('/api/opencode-live/update', 'POST', { zen: { visibleModels: ['deepseek-v4.1-flash-free'] } }),
+    newResponse(),
+  )
+  const providers = state.events
+    .filter((entry) => entry.event === 'llm/models-updated')
+    .map((entry) => entry.args[0])
+  assert.ok(providers.includes('opencode-zen-free'), `没有广播 Zen 路由：${JSON.stringify(providers)}`)
+})
+
+await test('一次保存只广播一次（指纹未变时不重复）', async () => {
+  // A refresh runs on every request path and on the timer; announcing an
+  // unchanged roster each time would make every open picker reload for nothing.
+  const { ctx, state } = fakeCtx()
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ocl-annidem-'))
+  mount(ctx, state, {
+    overridesPath: tmp,
+    baseURL: 'https://127.0.0.1:1/v1',
+    discoveryTimeoutMs: 150,
+    models: [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }],
+  })
+  await settle()
+  const handler = state.webRoutes.get('/api/opencode-live')
+  // Two saves that leave the roster in the same state.
+  await handler(newRequest('/api/opencode-live/update', 'POST', { visibleModels: ['a'] }), newResponse())
+  const first = state.events.filter((entry) => entry.event === 'llm/models-updated').length
+  await handler(newRequest('/api/opencode-live/update', 'POST', { displayName: '改名但也可能没变' }), newResponse())
+  state.events.length = 0
+  await handler(newRequest('/api/opencode-live/update', 'POST', { visibleModels: ['a'] }), newResponse())
+  const again = state.events.filter((entry) => entry.event === 'llm/models-updated').length
+  assert.ok(first > 0)
+  assert.equal(again, 0, 'roster 没变却又广播了一次')
+})
+
+await test('没有事件总线时不因此抛错（保存仍然成功）', async () => {
+  // An older composition may expose no `emit`; a save that already landed on disk
+  // must not turn into a 500 because the notification channel is missing.
+  const { ctx, state } = fakeCtx()
+  delete ctx.emit
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ocl-annoemit-'))
+  mount(ctx, state, {
+    overridesPath: tmp,
+    baseURL: 'https://127.0.0.1:1/v1',
+    discoveryTimeoutMs: 150,
+    models: [{ id: 'a', name: 'A' }],
+  })
+  await settle()
+  const handler = state.webRoutes.get('/api/opencode-live')
+  const res = newResponse()
+  await handler(newRequest('/api/opencode-live/update', 'POST', { visibleModels: [] }), res)
+  assert.equal(res.statusCode, 200, res.body)
+  assert.deepEqual(JSON.parse(res.body).models, [])
+})
+
+await test('保存 modelSettings 也广播（容量/档位变了但 ID 没变）', async () => {
+  // A fingerprint over ids alone would call this "unchanged" and suppress the
+  // announcement, leaving the picker showing the old capacity.
+  const { ctx, state } = fakeCtx()
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ocl-anncfg-'))
+  mount(ctx, state, {
+    overridesPath: tmp,
+    baseURL: 'https://127.0.0.1:1/v1',
+    discoveryTimeoutMs: 150,
+    models: [{ id: 'a', name: 'A' }],
+  })
+  await settle()
+  state.events.length = 0
+  const handler = state.webRoutes.get('/api/opencode-live')
+  await handler(
+    newRequest('/api/opencode-live/update', 'POST', { modelSettings: { a: { contextWindow: 999999 } } }),
+    newResponse(),
+  )
+  assert.ok(
+    state.events.some((entry) => entry.event === 'llm/models-updated'),
+    '只改了容量却没有任何广播',
+  )
+})
+
+await test('广播失败只记警告，不让保存失败', async () => {
+  const { ctx, state } = fakeCtx()
+  ctx.emit = () => { throw new Error('listener exploded') }
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ocl-annerr-'))
+  mount(ctx, state, {
+    overridesPath: tmp,
+    baseURL: 'https://127.0.0.1:1/v1',
+    discoveryTimeoutMs: 150,
+    models: [{ id: 'a', name: 'A' }],
+  })
+  await settle()
+  const handler = state.webRoutes.get('/api/opencode-live')
+  const res = newResponse()
+  await handler(newRequest('/api/opencode-live/update', 'POST', { visibleModels: [] }), res)
+  assert.equal(res.statusCode, 200, res.body)
+  assert.ok(state.warnings.some((args) => String(args[0]).includes('llm/models-updated')))
+})
+
+await test('reset 之后 roster 立即恢复为全部，并广播', async () => {
+  const { ctx, state } = fakeCtx()
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ocl-annreset-'))
+  mount(ctx, state, {
+    overridesPath: tmp,
+    baseURL: 'https://127.0.0.1:1/v1',
+    discoveryTimeoutMs: 150,
+    models: [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }],
+  })
+  await settle()
+  const handler = state.webRoutes.get('/api/opencode-live')
+  await handler(newRequest('/api/opencode-live/update', 'POST', { visibleModels: ['a'] }), newResponse())
+  state.events.length = 0
+  const res = newResponse()
+  await handler(newRequest('/api/opencode-live/reset', 'POST', {}), res)
+  assert.equal(res.statusCode, 200, res.body)
+  assert.deepEqual(
+    JSON.parse(res.body).models.map((m) => m.id).sort(),
+    ['a', 'b'],
+    'reset 后没有立刻恢复完整清单',
+  )
+  assert.ok(
+    state.events.some((entry) => entry.event === 'llm/models-updated'),
+    'reset 后没有广播',
+  )
 })
 
 // ── vision capability ───────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 {
   "name": "dsh-opencode-live",
-  "version": "0.2.0",
+  "version": "0.2.3",
   "private": true,
   "type": "module",
   "description": "A DSH route for OpenCode Go whose model roster is the gateway's live listing rather than the installed pi-ai snapshot, with per-model wire-protocol mapping, a per-conversation x-opencode-session header, and its own settings page.",

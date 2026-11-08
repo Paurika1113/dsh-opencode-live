@@ -17,7 +17,11 @@ import {
   normalize,
   normalizeBaseURL,
   normalizeModelSettings,
+  normalizeProxyEnabled,
+  normalizeProxyUrl,
+  proxyEgressOf,
 } from '../lib/config.js'
+import { dispatcherFor, egressFetch, egressInit, causeChainOf } from '../lib/proxy.js'
 import { SESSION_RE, sessionForConversation, requestIdFor } from '../lib/session.js'
 import {
   toAnthropicMessages,
@@ -1028,6 +1032,210 @@ test('指纹不复制已有槽位', () => {
 
 test('恢复工具名对未知名字原样返回', () => {
   assert.equal(restoreToolName('other', new Map([['bash', 'pwsh']])), 'other')
+})
+
+// ── proxy egress ────────────────────────────────────────────────────────────
+
+section('代理出口')
+
+test('normalizeProxyUrl：空与空白都是直连', () => {
+  assert.equal(normalizeProxyUrl(''), '')
+  assert.equal(normalizeProxyUrl('   '), '')
+  assert.equal(normalizeProxyUrl(undefined), '')
+  assert.equal(normalizeProxyUrl(null), '')
+})
+
+test('normalizeProxyUrl：修剪空白与尾斜杠，去掉 query/fragment', () => {
+  assert.equal(normalizeProxyUrl(' http://192.0.2.10:7890/ '), 'http://192.0.2.10:7890')
+  assert.equal(normalizeProxyUrl('http://192.0.2.10:7890/p?x=1#f'), 'http://192.0.2.10:7890/p')
+  assert.equal(normalizeProxyUrl('https://Proxy.Example:8443'), 'https://proxy.example:8443')
+})
+
+test('normalizeProxyUrl：非 http(s) 与乱串拒绝', () => {
+  assert.throws(() => normalizeProxyUrl('socks5://192.0.2.10:7891'), ConfigError)
+  assert.throws(() => normalizeProxyUrl('ftp://x.test'), ConfigError)
+  assert.throws(() => normalizeProxyUrl('192.0.2.10:7890'), ConfigError)
+})
+
+test('normalize() 透传 proxyUrl，非法值报 ConfigError', () => {
+  assert.equal(normalize({}).proxyUrl, '')
+  assert.equal(normalize({ proxyUrl: 'http://192.0.2.10:7890' }).proxyUrl, 'http://192.0.2.10:7890')
+  assert.throws(() => normalize({ proxyUrl: 'nonsense' }), ConfigError)
+})
+
+// A minimal stand-in for undici: records the URL and the factory, nothing more.
+// The real module is not on this test's import path, and these tests only
+// exercise the wiring.
+class FakeProxyAgent {
+  constructor(opts) {
+    const uri = typeof opts === 'string' ? opts : opts?.uri
+    this.proxyUrl = uri
+    this.factory = typeof opts === 'object' ? opts?.factory : undefined
+  }
+}
+const fakeUndici = { ProxyAgent: FakeProxyAgent, Pool: class {} }
+
+test('egressInit：无代理时原样返回，不携带 dispatcher', async () => {
+  const init = { method: 'POST', headers: { a: 'b' } }
+  const out = await egressInit('', init, { undiciMod: fakeUndici })
+  assert.equal(out, init)
+  assert.equal('dispatcher' in out, false)
+})
+
+test('egressInit：配置代理后 init 携带 dispatcher，且按 URL 复用', async () => {
+  const url = 'http://192.0.2.10:7890'
+  const first = await egressInit(url, { method: 'POST' }, { undiciMod: fakeUndici })
+  assert.equal(first.method, 'POST')
+  assert.ok(first.dispatcher instanceof FakeProxyAgent)
+  assert.equal(first.dispatcher.proxyUrl, url)
+  const second = await dispatcherFor(url, fakeUndici)
+  assert.equal(second, first.dispatcher)
+})
+
+test('egressInit：代理不可用时优雅退回直连，且只警告一次', async () => {
+  const url = 'http://192.0.2.10:9999'
+  const warns = []
+  const init = { method: 'GET' }
+  // undici 解析不到（这里注入一个没有 ProxyAgent 的假模块——真机器上 undici
+  // 往往解析得到，路径回退是否失效不能用机器状态来测）。
+  const noProxy = {}
+  const first = await egressInit(url, init, { undiciMod: noProxy, log: (...a) => warns.push(a.join(' ')) })
+  assert.equal(first, init)
+  await egressInit(url, init, { undiciMod: noProxy, log: (...a) => warns.push(a.join(' ')) })
+  assert.equal(warns.length, 1)
+  assert.match(warns[0], /退回直连/)
+})
+
+test('egressFetch：把带 dispatcher 的 init 交给注入的 fetchImpl', async () => {
+  const seen = []
+  const stub = (url, init) => {
+    seen.push({ url, init })
+    return 'response-sentinel'
+  }
+  const out = await egressFetch('http://192.0.2.10:7890', 'https://gateway.test/v1/models', { method: 'GET' }, {
+    fetchImpl: stub,
+    undiciMod: fakeUndici,
+  })
+  assert.equal(out, 'response-sentinel')
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].url, 'https://gateway.test/v1/models')
+  assert.ok(seen[0].init.dispatcher instanceof FakeProxyAgent)
+})
+
+// ── the manual proxy switch ─────────────────────────────────────────────────
+//
+// `proxyUrl` says where the proxy lives, `proxyEnabled` says whether it is in
+// play. Both facts are stored so turning egress off costs the address, and the
+// egress itself comes from the one function that combines them — nothing else
+// may read `proxyUrl` directly, or half the lanes would keep using a proxy the
+// page says is off.
+
+test('normalizeProxyEnabled：只把明确的关闭值读成 false', () => {
+  // Off, in every spelling a checkbox event or a hand-edited file produces.
+  for (const off of [false, 0, 'false', '0', 'off']) {
+    assert.equal(normalizeProxyEnabled(off), false, `${JSON.stringify(off)} 应读成关闭`)
+  }
+  // Everything else — including the absence of the field — leaves egress on, which
+  // is what keeps an existing deployment behaving exactly as it did before the
+  // switch existed.
+  for (const on of [true, 1, 'true', 'on', undefined, null, '', 'yes']) {
+    assert.equal(normalizeProxyEnabled(on), true, `${JSON.stringify(on)} 应读成开启`)
+  }
+})
+
+test('normalize()：proxyEnabled 默认为 true，可与 proxyUrl 分开设置', () => {
+  assert.equal(normalize({}).proxyEnabled, true)
+  assert.equal(normalize({ proxyUrl: 'http://127.0.0.1:7890' }).proxyEnabled, true)
+  assert.equal(normalize({ proxyEnabled: false }).proxyEnabled, false)
+  // 关掉开关不能把地址一起丢掉——"先关掉、地址还在"是这个字段存在的理由。
+  const off = normalize({ proxyUrl: 'http://127.0.0.1:7890', proxyEnabled: false })
+  assert.equal(off.proxyUrl, 'http://127.0.0.1:7890')
+  assert.equal(off.proxyEnabled, false)
+})
+
+test('proxyEgressOf：开关关掉时答空串，即直连', () => {
+  const on = normalize({ proxyUrl: 'http://127.0.0.1:7890' })
+  assert.equal(proxyEgressOf(on), 'http://127.0.0.1:7890')
+
+  const off = normalize({ proxyUrl: 'http://127.0.0.1:7890', proxyEnabled: false })
+  assert.equal(proxyEgressOf(off), '')
+
+  // 没配地址时也是直连，与开关状态无关——两个都为空的路径不该有第二种含义。
+  assert.equal(proxyEgressOf(normalize({})), '')
+  assert.equal(proxyEgressOf(normalize({ proxyEnabled: false })), '')
+})
+
+test('proxyEgressOf：产物直接喂给 egressInit 就是直连', async () => {
+  // The switch has to reach undici, not just the config object: an off switch must
+  // produce an init with no `dispatcher`, which is the documented direct-dial shape.
+  const off = normalize({ proxyUrl: 'http://192.0.2.10:7890', proxyEnabled: false })
+  const init = { method: 'POST' }
+  const out = await egressInit(proxyEgressOf(off), init, { undiciMod: fakeUndici })
+  assert.equal(out, init)
+  assert.equal('dispatcher' in out, false)
+
+  // …while the same address with the switch on does attach one. Same config, one
+  // flag apart, so a regression in either direction fails here.
+  const on = normalize({ proxyUrl: 'http://192.0.2.10:7890' })
+  const proxied = await egressInit(proxyEgressOf(on), { method: 'POST' }, { undiciMod: fakeUndici })
+  assert.ok(proxied.dispatcher instanceof FakeProxyAgent)
+})
+
+// ── the cause chain ─────────────────────────────────────────────────────────
+//
+// Every undici connection failure reaches us as `TypeError: fetch failed`, whose
+// own message names nothing. The distinguishing fact is on `cause`, and a message
+// without it sent a real outage investigation looking at the gateway when the dead
+// component was a local proxy port. These cases pin the extraction, including the
+// shapes that used to break it.
+
+test('causeChainOf：把最具体的原因摆到最前面', () => {
+  const inner = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:7890'), { code: 'ECONNREFUSED' })
+  const outer = Object.assign(new TypeError('fetch failed'), { cause: inner })
+  const text = causeChainOf(outer)
+  assert.match(text, /ECONNREFUSED/, '缺少错误码')
+  assert.match(text, /127\.0\.0\.1:7890/, '缺少目标地址')
+})
+
+test('causeChainOf：跳过 undici 自己的 fetch failed 占位', () => {
+  // A middle link that only repeats "fetch failed" must not crowd out the real one.
+  const root = Object.assign(new Error('getaddrinfo ENOTFOUND gateway.invalid'), { code: 'ENOTFOUND' })
+  const middle = Object.assign(new TypeError('fetch failed'), { cause: root })
+  const outer = Object.assign(new TypeError('fetch failed'), { cause: middle })
+  const text = causeChainOf(outer)
+  assert.match(text, /ENOTFOUND/)
+  assert.equal(
+    (text.match(/fetch failed/g) ?? []).length,
+    0,
+    '占位文字不该出现在链里',
+  )
+})
+
+test('causeChainOf：代理失败的多层链能一路走到最内层', () => {
+  // The real nesting when a proxy refuses: fetch → proxy response → connect error.
+  const connect = Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' })
+  const proxy = Object.assign(new Error('Proxy response (502)'), { cause: connect })
+  const outer = Object.assign(new TypeError('fetch failed'), { cause: proxy })
+  const text = causeChainOf(outer)
+  assert.match(text, /Proxy response \(502\)/)
+  assert.match(text, /ECONNREFUSED/)
+})
+
+test('causeChainOf：没有 cause、空 cause 与自引用都不抛错', () => {
+  assert.equal(causeChainOf(new TypeError('fetch failed')), '')
+  assert.equal(causeChainOf(Object.assign(new Error('x'), { cause: null })), '')
+  assert.equal(causeChainOf(Object.assign(new Error('x'), { cause: 'a string' })), '')
+  // A chain that loops must terminate rather than hang a failed request.
+  const loop = new Error('loop')
+  loop.cause = loop
+  assert.doesNotThrow(() => causeChainOf(loop))
+})
+
+test('causeChainOf：字符串被忽略，只收对象链', () => {
+  // `cause` may legally be any value; a string carries no code and joining it
+  // would put stray text in a message the user reads.
+  const outer = Object.assign(new Error('fetch failed'), { cause: 'nope' })
+  assert.equal(causeChainOf(outer), '')
 })
 
 // ── run ─────────────────────────────────────────────────────────────────────

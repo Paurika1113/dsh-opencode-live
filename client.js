@@ -108,6 +108,21 @@ window.__ModuleLoader__.load({
         storeHint: '覆盖配置写在 {path}，也可以直接手改，下一回合生效。',
         liveHint: '保存后无需重启：下一个请求就用新的地址与密钥。',
 
+        // ── 代理出口 ──────────────────────────────────────────────────────
+        proxyTitle: '代理出口',
+        proxyEnable: '走代理',
+        proxyOn: '已开启 · 列表与对话都经代理',
+        proxyOff: '已关闭 · 全部直连（地址保留）',
+        proxyHint: '开关关掉即直连，代理地址不会丢。网关按出口地址做区域检查：直连被拒时打开它，代理没开或挂了时关掉它。开关对两条车道同时生效。',
+        proxyUrlLabel: '代理地址',
+        proxyUrlPlaceholder: 'http://127.0.0.1:7890',
+        proxyUrlInvalid: '代理地址必须以 http:// 或 https:// 开头',
+        proxyActive: '本回合实际出口',
+        proxyDirect: '直连',
+        proxyOnButEmpty: '开关已开，但地址为空，仍在直连——请填地址',
+        proxyUndiciMissing: 'undici 解析不到，代理不生效（已在直连）',
+        proxySaved: '代理开关已保存',
+
         // ── 每个模型的详细设置 ──────────────────────────────────────────────
         advanced: '详细设置',
         advancedSaved: '详细设置已保存',
@@ -229,6 +244,21 @@ window.__ModuleLoader__.load({
         storeHint: 'Overrides live in {path}; edit that file by hand and the next turn picks it up.',
         liveHint: 'No restart: the next request uses the new address and key.',
 
+        // ── proxy egress ───────────────────────────────────────────────────
+        proxyTitle: 'Proxy egress',
+        proxyEnable: 'Use proxy',
+        proxyOn: 'on · listing and chat both go through the proxy',
+        proxyOff: 'off · direct dialling (address kept)',
+        proxyHint: 'Switching it off dials direct and keeps the address. The gateway region-checks the dialling address: turn it on when direct is refused, off when the proxy is down. It applies to both lanes.',
+        proxyUrlLabel: 'Proxy address',
+        proxyUrlPlaceholder: 'http://127.0.0.1:7890',
+        proxyUrlInvalid: 'The proxy address must start with http:// or https://',
+        proxyActive: 'Dialling via',
+        proxyDirect: 'direct',
+        proxyOnButEmpty: 'Switch is on but the address is empty — still dialling direct; fill in the address',
+        proxyUndiciMissing: 'undici could not be resolved, so the proxy is inert (dialling direct)',
+        proxySaved: 'Proxy switch saved',
+
         // ── per-model advanced panel ────────────────────────────────────────
         advanced: 'Advanced',
         advancedSaved: 'Advanced settings saved',
@@ -304,6 +334,7 @@ window.__ModuleLoader__.load({
       .ocl_btnDanger { color: var(--dsw-alias-state-error-primary); }
       .ocl_pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 2px 8px;
         border-radius: 999px; border: 0.5px solid var(--dsw-alias-border-l3); color: var(--dsw-alias-label-secondary); }
+      .ocl_pillOff { color: var(--dsw-alias-label-tertiary); }
       .ocl_dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dsw-alias-state-success-primary); flex: none; }
       .ocl_dotBad { background: var(--dsw-alias-state-error-primary); }
       .ocl_dotIdle { background: var(--dsw-alias-label-dimmed); }
@@ -666,7 +697,15 @@ window.__ModuleLoader__.load({
         let payload
         try { payload = text === '' ? undefined : JSON.parse(text) }
         catch { throw new Error(text.slice(0, 200)) }
-        if (!res.ok) throw new Error(payload?.error ?? `HTTP ${res.status}`)
+        if (!res.ok) {
+          // Prefer the server's own reason over the bare status. `/refresh` and
+          // `/refresh-zen` answer 502 with a report whose `message` names the real
+          // cause ("无法连接网关：fetch failed"); throwing `HTTP 502` instead threw
+          // that away and left the page reporting a gateway status that never
+          // happened. `error` is the shape `/update` uses, so both are read.
+          const reason = payload?.error ?? payload?.message
+          throw new Error(typeof reason === 'string' && reason !== '' ? reason : `HTTP ${res.status}`)
+        }
         return payload
       } catch (error) {
         if (error?.name === 'AbortError') throw new Error(`${API}${path} 在 ${timeout}ms 内没有响应`)
@@ -902,10 +941,63 @@ window.__ModuleLoader__.load({
         try {
           const res = await call('/refresh-zen', { method: 'POST' })
           if (res?.view) setView(res.view)
-          setNotice(res?.message ?? t('ready'))
+          // A failed round used to land in `notice` (green), so "the gateway is
+          // unreachable" read as success. The report says `ok: false`; honour it.
+          if (res?.ok === false) setFailure(res?.message ?? `${t('err')}: HTTP ${res?.status ?? ''}`)
+          else setNotice(res?.message ?? t('ready'))
         } catch (error) {
           setFailure(`${t('err')}: ${String(error?.message ?? error)}`)
         } finally { setBusy('') }
+      }
+
+      /**
+       * Flip the proxy switch, or retype the address.
+       *
+       * One action for both because the two are one decision: a switch with no
+       * address does nothing, and an address with the switch off is inert. The
+       * server keeps them as separate fields so turning the proxy off never
+       * costs the address, but the page always writes the pair it can see.
+       *
+       * The follow-up refresh is what makes flipping the switch take effect at
+       * once: the roster is re-read through the new egress immediately instead of
+       * on the next timer tick, so the status line under the switch answers "did
+       * it work?" rather than "ask again in five minutes". That refresh is also
+       * the only self-test worth having — it dials the real endpoint through the
+       * real path.
+       */
+      const saveProxy = async (patch) => {
+        setSaving('proxy')
+        setFailure('')
+        setNotice('')
+        try {
+          const next = await call('/update', { method: 'POST', body: patch })
+          setView(next)
+          setNotice(t('proxySaved'))
+          const report = await call('/refresh', { method: 'POST' })
+          if (report?.view) setView(report.view)
+          // A refresh that fails right after switching the proxy on is the useful
+          // signal — say so here rather than in a notice that looks like success.
+          if (report?.ok === false) setFailure(report?.message ?? t('err'))
+          else setNotice(t('proxySaved'))
+        } catch (error) {
+          setFailure(`${t('err')}: ${String(error?.message ?? error)}`)
+        } finally { setSaving('') }
+      }
+
+      /** Commit the address box on blur/Enter, refusing a scheme Node cannot dial. */
+      const commitProxyUrl = (raw) => {
+        const value = String(raw ?? '').trim()
+        const egress = view?.egress ?? {}
+        if (value === '') {
+          void saveProxy({ proxyUrl: null })
+          return
+        }
+        if (!/^https?:\/\//i.test(value)) {
+          setFailure(t('proxyUrlInvalid'))
+          return
+        }
+        if (value === (egress.proxyUrl ?? '')) return
+        void saveProxy({ proxyUrl: value })
       }
 
       const toggleZenEnabled = async (enabled) => {
@@ -1081,6 +1173,79 @@ window.__ModuleLoader__.load({
         return `${when} · ${last.ok ? (last.message ?? '') : `${t('err')}: ${last.message}`}`
       }
 
+      /**
+       * The proxy switch.
+       *
+       * Not folded into the edit/save row above: the switch is meant to be usable
+       * *while diagnosing*, which is exactly when the page must not be in an edit
+       * session that has to be cancelled. It saves on click, like the visibility
+       * checkboxes, and the address box commits on blur rather than per keystroke
+       * (a half-typed `http://1` is not an address, and saving it would take the
+       * route down between letters).
+       */
+      const proxyCard = () => {
+        const enabled = view?.proxyEnabled !== false
+        const address = view?.egress?.proxyUrl ?? ''
+        const active = view?.egress?.active ?? ''
+        const undiciMissing = view?.egress?.undici === 'missing'
+        const busyProxy = saving === 'proxy'
+
+        // The one state that looks configured but is not: switch on, no address.
+        // Naming it is the whole point of the card — otherwise the user toggles,
+        // sees no change, and concludes the switch is broken.
+        const stuck = enabled && address === ''
+
+        return h('div', { className: 'ocl_card' },
+          h('div', { className: 'ocl_cardTitle' },
+            t('proxyTitle'),
+            h('span', { className: `ocl_pill ${enabled && !stuck ? '' : 'ocl_pillOff'}` },
+              h('span', {
+                className: `ocl_dot ${enabled && !stuck ? '' : 'ocl_dotBad'}`,
+              }),
+              enabled ? t('proxyOn') : t('proxyOff')),
+          ),
+          h('div', { className: 'ocl_row' },
+            h('label', { className: 'ocl_switch' },
+              h('input', {
+                type: 'checkbox',
+                checked: enabled,
+                disabled: busyProxy || view === undefined || view === null,
+                onChange: (e) => { void saveProxy({ proxyEnabled: e.target.checked }) },
+              }),
+            ),
+            h('span', { className: 'ocl_body' }, t('proxyEnable')),
+            h('span', { className: 'ocl_tag ocl_tagOk' }, `${t('proxyActive')}: ${active === '' ? t('proxyDirect') : active}`),
+          ),
+          h('div', { className: 'ocl_grid' },
+            field(t('proxyUrlLabel'), h('input', {
+              className: `ocl_input ${stuck ? 'ocl_inputBad' : ''}`,
+              // `key` on the address: the box is uncontrolled (so a half-typed
+              // address is never saved per keystroke), but the server normalizes
+              // what it stores — `…:7890/` becomes `…:7890`. Keying on the stored
+              // value remounts the box when that normalization lands, so it shows
+              // what is actually configured. It cannot fire mid-typing: the view
+              // only changes after a save.
+              key: `proxy-address:${address}`,
+              defaultValue: address,
+              placeholder: t('proxyUrlPlaceholder'),
+              disabled: busyProxy,
+              title: t('proxyUrlLabel'),
+              onBlur: e => { commitProxyUrl(e.target.value) },
+              onKeyDown: (e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  commitProxyUrl(e.currentTarget.value)
+                  e.currentTarget.blur()
+                }
+              },
+            })),
+          ),
+          h('p', { className: 'ocl_note' }, t('proxyHint')),
+          stuck ? h('p', { className: 'ocl_note ocl_err' }, t('proxyOnButEmpty')) : null,
+          enabled && undiciMissing ? h('p', { className: 'ocl_note ocl_err' }, t('proxyUndiciMissing')) : null,
+        )
+      }
+
       // Where the `auto` capacity numbers came from. Reading "200000" without
       // knowing the offline snapshot was in use would be misleading — the
       // snapshot can be a day old or simply wrong for a model it predates.
@@ -1156,6 +1321,10 @@ window.__ModuleLoader__.load({
             h('button', { className: 'ocl_btn', disabled: editing || busy !== '', onClick: reset }, t('reset')),
           ),
         ),
+
+        // 代理出口：手动开关 + 地址。放在路由卡片之后、模型卡片之前——它属于
+        // "这条路由怎么连出去"，不属于"网关列出了什么"。
+        proxyCard(),
 
         // The catalogue and the visibility checklist.
         h('div', { className: 'ocl_card' },
